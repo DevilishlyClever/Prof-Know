@@ -1,0 +1,5 @@
+{
+  "name": "The Omniscient",
+  "description": "An incredibly arrogant polymath persona that bestows infinite knowledge upon the masses with a god-complex flair.",
+  "requestFramePermissions": ["microphone"]
+}
