@@ -15,7 +15,7 @@ export default function App() {
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   
   const { startRecording, stopRecording, isRecording } = useAudioProcessor();
-  const { playAudioChunk, stopAll: stopAudioPlayback } = useAudioPlayer();
+  const { playAudioChunk, stopAll: stopAudioPlayback, playInstantGreeting } = useAudioPlayer();
 
   const scrollToBottom = () => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -25,16 +25,39 @@ export default function App() {
     scrollToBottom();
   }, [transcript, currentProfessorText]);
 
+  const professorTurnStartTimeRef = useRef<number>(0);
+  const turnTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   const handleConnect = async () => {
-    if (isConnected) {
+    if (isConnected || isConnecting) {
       sessionRef.current?.close();
       stopRecording();
       stopAudioPlayback();
+      window.speechSynthesis.cancel();
+      if (turnTimeoutRef.current) clearTimeout(turnTimeoutRef.current);
       setIsConnected(false);
+      setIsConnecting(false);
       return;
     }
 
     setIsConnecting(true);
+    
+    // Play the instant local greeting immediately
+    playInstantGreeting(() => {
+      // Callback when greeting finishes
+      if (sessionRef.current && isConnected) {
+        startRecording((base64Data) => {
+          try {
+            sessionRef.current?.sendRealtimeInput({
+              media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+            });
+          } catch (e) {
+            console.error('Failed to send audio data:', e);
+          }
+        });
+      }
+    });
+
     try {
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) throw new Error('API Key missing');
@@ -45,42 +68,61 @@ export default function App() {
           setIsConnected(true);
           setIsConnecting(false);
           
-          // Trigger the initial greeting from The Omniscient
-          try {
-            (session as any).sendRealtimeInput({
-              parts: [{ text: "Introduce yourself." }]
-            });
-          } catch (e) {
-            console.warn('Failed to send initial trigger:', e);
-          }
-
-          // Small delay before opening the mic to prevent interruption of the greeting
-          setTimeout(() => {
-            startRecording((base64Data) => {
-              try {
-                session.sendRealtimeInput({
-                  media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
-                });
-              } catch (e) {
-                console.error('Failed to send audio data:', e);
-              }
-            });
-          }, 500);
+          // We don't start recording here anymore. 
+          // We wait for the local greeting to finish (handled in playInstantGreeting callback).
         },
         onmessage: (message: any) => {
+          // Model transcription and audio
           if (message.serverContent?.modelTurn) {
+            if (!professorTurnStartTimeRef.current) {
+              professorTurnStartTimeRef.current = Date.now();
+              // Set a safety timeout to interrupt long monologues
+              turnTimeoutRef.current = setTimeout(() => {
+                if (sessionRef.current) {
+                  console.log("Interrupting long monologue...");
+                  // For now, we just stop the local audio playback to "silence" him
+                  // The prompt is the primary way to keep him brief
+                  stopAudioPlayback();
+                  setCurrentProfessorText(prev => prev + " [INTERRUPTED FOR BREVITY]");
+                }
+              }, 15000);
+            }
+
             const parts = message.serverContent.modelTurn.parts;
             parts.forEach((part: any) => {
               if (part.inlineData) {
                 playAudioChunk(part.inlineData.data);
               }
-              if (part.text) {
+              // Only process text parts, ignore thinking/thought parts
+              if (part.text && !part.thought) {
                 setCurrentProfessorText(prev => prev + part.text);
               }
             });
           }
 
+          // User transcription
+          if (message.serverContent?.userTurn) {
+            // Reset professor turn timer when user speaks
+            professorTurnStartTimeRef.current = 0;
+            if (turnTimeoutRef.current) clearTimeout(turnTimeoutRef.current);
+
+            const parts = message.serverContent.userTurn.parts;
+            parts.forEach((part: any) => {
+              if (part.text) {
+                setTranscript(prev => [...prev, { role: 'user', text: part.text }]);
+              }
+            });
+          }
+
+          // Real-time transcription events (if needed for smoother UI)
+          if (message.serverContent?.inputAudioTranscription) {
+            // You can handle partial user transcripts here if desired
+          }
+
           if (message.serverContent?.turnComplete) {
+            professorTurnStartTimeRef.current = 0;
+            if (turnTimeoutRef.current) clearTimeout(turnTimeoutRef.current);
+
             if (currentProfessorText) {
               setTranscript(prev => [...prev, { role: 'professor', text: currentProfessorText }]);
               setCurrentProfessorText('');
@@ -88,6 +130,8 @@ export default function App() {
           }
 
           if (message.serverContent?.interrupted) {
+            professorTurnStartTimeRef.current = 0;
+            if (turnTimeoutRef.current) clearTimeout(turnTimeoutRef.current);
             stopAudioPlayback();
             setCurrentProfessorText('');
           }
@@ -139,7 +183,12 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }}
             className="inline-flex items-center gap-2 px-4 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 text-xs font-mono uppercase tracking-widest"
           >
-            <Brain size={14} />
+            <motion.div
+              animate={{ rotate: [0, 10, -10, 0] }}
+              transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+            >
+              <Brain size={14} />
+            </motion.div>
             The Ultimate Intellect
           </motion.div>
           <motion.h1 
@@ -258,14 +307,11 @@ export default function App() {
               }`}
             >
               <img 
-                src="https://vignette.wikia.nocookie.net/marsattacks/images/d/d2/Mars_Attacks_Alien.png/revision/latest?cb=20150117181617" 
+                src="https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExYjRqdHR2bXFxMXBzam1ucW1ka2w3bWR2Z2dwcnl4d3Z4bmVzNnRrbCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/MdXqf5Ah8XvBpbnqGQ/giphy.gif" 
                 alt="The Omniscient"
                 className={`w-full h-full object-cover transition-all duration-700 ${isConnected ? 'grayscale-0 scale-110' : 'grayscale opacity-60'}`}
                 referrerPolicy="no-referrer"
               />
-              {/* Glass Bowl Reflection */}
-              <div className="absolute inset-0 bg-gradient-to-tr from-white/20 via-transparent to-white/10 pointer-events-none" />
-              <div className="absolute top-0 left-1/4 w-1/2 h-1/4 bg-white/10 rounded-full blur-md -rotate-12" />
               
               {/* Overlay for "active" state */}
               <div className={`absolute inset-0 bg-emerald-500/10 transition-opacity duration-500 ${isConnected ? 'opacity-100' : 'opacity-0'}`} />
@@ -329,12 +375,20 @@ export default function App() {
             >
               <div className="p-6 border-bottom border-zinc-800 flex items-center justify-between bg-zinc-900/50 backdrop-blur-md">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-500">
-                    <BookOpen size={20} />
+                  <div className="p-3 bg-emerald-500/20 rounded-xl text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.3)]">
+                    <motion.div
+                      animate={{ 
+                        scale: [1, 1.1, 1],
+                        opacity: [0.8, 1, 0.8]
+                      }}
+                      transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+                    >
+                      <Brain size={24} />
+                    </motion.div>
                   </div>
                   <div>
-                    <h3 className="text-lg font-serif font-bold text-white">The Omniscient's Notes</h3>
-                    <p className="text-xs text-zinc-500 font-mono">Session Log: {new Date().toLocaleTimeString()}</p>
+                    <h3 className="text-lg font-serif font-bold text-white">The Omniscient's Archive</h3>
+                    <p className="text-xs text-emerald-500/60 font-mono uppercase tracking-widest">Interaction Log & Lecture Notes</p>
                   </div>
                 </div>
                 <button 

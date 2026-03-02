@@ -155,5 +155,111 @@ export function useAudioPlayer() {
     }
   };
 
-  return { playAudioChunk, stopAll };
+  const playInstantGreeting = async (onComplete?: () => void) => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+    }
+    
+    const ctx = audioContextRef.current;
+    if (ctx.state === 'suspended') await ctx.resume();
+
+    // 1. Synthesize "Microphone Taps" with Reverb
+    const playTap = (delay: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      // Simple reverb-like decay using gain instead of Convolver if it's failing
+      // But let's try to fix the Convolver first by making it more robust
+      try {
+        const reverb = ctx.createConvolver();
+        const sampleRate = ctx.sampleRate;
+        const length = sampleRate * 0.4;
+        const impulse = ctx.createBuffer(2, length, sampleRate);
+        for (let i = 0; i < 2; i++) {
+          const channelData = impulse.getChannelData(i);
+          for (let j = 0; j < length; j++) {
+            channelData[j] = (Math.random() * 2 - 1) * Math.pow(1 - j / length, 2);
+          }
+        }
+        reverb.buffer = impulse;
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(180, ctx.currentTime + delay);
+        osc.frequency.exponentialRampToValueAtTime(40, ctx.currentTime + delay + 0.15);
+        
+        gain.gain.setValueAtTime(0.8, ctx.currentTime + delay); // Louder
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + delay + 0.15);
+        
+        osc.connect(gain);
+        gain.connect(reverb);
+        reverb.connect(ctx.destination);
+        
+        osc.start(ctx.currentTime + delay);
+        osc.stop(ctx.currentTime + delay + 0.2);
+      } catch (e) {
+        // Fallback to no reverb if Convolver fails
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(180, ctx.currentTime + delay);
+        osc.frequency.exponentialRampToValueAtTime(40, ctx.currentTime + delay + 0.15);
+        gain.gain.setValueAtTime(0.8, ctx.currentTime + delay);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + delay + 0.15);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + delay);
+        osc.stop(ctx.currentTime + delay + 0.2);
+      }
+    };
+
+    playTap(0);
+    playTap(0.25);
+    playTap(0.5);
+
+    // 2. Use Web Speech API for the line
+    const speak = () => {
+      const voices = window.speechSynthesis.getVoices();
+      const maleVoice = voices.find(v => 
+        (v.name.toLowerCase().includes('male') || 
+         v.name.toLowerCase().includes('david') || 
+         v.name.toLowerCase().includes('mark') || 
+         v.name.toLowerCase().includes('google us english male')) && 
+        v.lang.startsWith('en')
+      ) || voices.find(v => v.name.includes('Google US English') || v.lang === 'en-US');
+
+      const createUtterance = (text: string) => {
+        const u = new SpeechSynthesisUtterance(text);
+        if (maleVoice) u.voice = maleVoice;
+        u.pitch = 0.75;
+        u.rate = 0.85;
+        u.volume = 1.0;
+        return u;
+      };
+
+      // Part 1: The check
+      const part1 = createUtterance("Is this thing on?");
+      
+      part1.onend = () => {
+        // Pause for 1 second to simulate offstage reply
+        setTimeout(() => {
+          // Part 2: The confirmation and intro
+          const part2 = createUtterance("Very good, very good. Well hello there, I'm The Omniscient, and there is NOTHING I DON'T KNOW! Ask away!");
+          part2.onend = () => {
+            if (onComplete) onComplete();
+          };
+          window.speechSynthesis.speak(part2);
+        }, 1000);
+      };
+
+      window.speechSynthesis.speak(part1);
+    };
+
+    setTimeout(() => {
+      if (window.speechSynthesis.getVoices().length === 0) {
+        window.speechSynthesis.onvoiceschanged = speak;
+      } else {
+        speak();
+      }
+    }, 800);
+  };
+
+  return { playAudioChunk, stopAll, playInstantGreeting };
 }
